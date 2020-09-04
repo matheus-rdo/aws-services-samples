@@ -11,14 +11,15 @@ import (
 	"github.com/aws/aws-sdk-go/service/kms"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3crypto"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/matheushr97/aws-services-samples/settings"
 )
 
 func main() {
 	start := time.Now()
 
-	//err := upload()
-	err := download()
+	err := uploadEncrypted()
+	//err := downloadEncrypted()
 	if err != nil {
 		fmt.Println("ERRO: " + err.Error())
 	}
@@ -26,7 +27,9 @@ func main() {
 	fmt.Println("Duração: " + time.Since(start).String())
 }
 
-func upload() error {
+// ENCRYPTED
+
+func uploadEncrypted() error {
 	sess := session.New(&aws.Config{
 		Region: aws.String("us-east-1"),
 	})
@@ -70,7 +73,7 @@ func upload() error {
 	return err
 }
 
-func download() error {
+func downloadEncrypted() error {
 	sess := session.New(&aws.Config{
 		Region: aws.String("us-east-1"),
 	})
@@ -120,6 +123,54 @@ func download() error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Downloaded %d bytes \n", n)
+	return nil
+}
+
+// UNENCRYPTED
+
+func upload() error {
+	sess := session.New(&aws.Config{
+		Region: aws.String("us-east-1"),
+	})
+
+	file, err := os.Open(settings.FileName)
+	if err != nil {
+		return err
+	}
+
+	uploader := s3manager.NewUploader(sess)
+	objectKey := file.Name() + ".unencrypted"
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket: &settings.BucketName,
+		Key:    &objectKey,
+		Body:   file,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Object sucessfully uploaded")
+	return nil
+}
+
+func download() error {
+	sess := session.New(&aws.Config{
+		Region: aws.String("us-east-1"),
+	})
+
+	outputFile := settings.FileName + ".unencrypted"
+	output, err := os.Create(outputFile)
+	if err != nil {
+		return err
+	}
+
+	downloader := s3manager.NewDownloader(sess)
+	n, err := downloader.Download(output, &s3.GetObjectInput{
+		Bucket: &settings.BucketName,
+		Key:    &outputFile,
+	})
+
 	fmt.Printf("Downloaded %d bytes \n", n)
 	return nil
 }
