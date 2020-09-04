@@ -1,9 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -14,15 +15,18 @@ import (
 )
 
 func main() {
-	err := upload()
-	//err := download()
+	start := time.Now()
+
+	//err := upload()
+	err := download()
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("ERRO: " + err.Error())
 	}
+
+	fmt.Println("Duração: " + time.Since(start).String())
 }
 
 func upload() error {
-	arn := settings.Arn
 	sess := session.New(&aws.Config{
 		Region: aws.String("us-east-1"),
 	})
@@ -31,20 +35,31 @@ func upload() error {
 	// The IV makes it more difficult for hackers to use dictionary attacks.
 	// The key wrap handler behaves as the master key. Without it, you can’t
 	// encrypt or decrypt the data.
-	keywrap := s3crypto.NewKMSKeyGenerator(kms.New(sess), arn)
+	var matDesc s3crypto.MaterialDescription
+	cipherDataGenerator := s3crypto.NewKMSContextKeyGenerator(kms.New(sess), settings.KmsKeyArn, matDesc)
+
 	// This is our content cipher builder, used to instantiate new ciphers
 	// that enable us to encrypt or decrypt the payload.
-	builder := s3crypto.AESGCMContentCipherBuilder(keywrap)
+	contentCipherBuilder := s3crypto.AESGCMContentCipherBuilderV2(cipherDataGenerator)
 	// Let's create our crypto client!
-	client := s3crypto.NewEncryptionClient(sess, builder)
-
-	input := &s3.PutObjectInput{
-		Bucket: &settings.BucketName,
-		Key:    &settings.ObjectKey,
-		Body:   bytes.NewReader([]byte("Hello encryption world")),
+	encryptionClient, err := s3crypto.NewEncryptionClientV2(sess, contentCipherBuilder)
+	if err != nil {
+		return err
 	}
 
-	_, err := client.PutObject(input)
+	file, err := os.Open(settings.FileName)
+	if err != nil {
+		return err
+	}
+
+	objectKey := file.Name() + ".encrypted"
+	input := &s3.PutObjectInput{
+		Bucket: &settings.BucketName,
+		Key:    &objectKey,
+		Body:   file,
+	}
+
+	_, err = encryptionClient.PutObject(input)
 	// What to expect as errors? You can expect any sort of S3 errors, http://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html.
 	// The s3crypto client can also return some errors:
 	//  * MissingCMKIDError - when using AWS KMS, the user must specify their key's ARN
@@ -59,14 +74,31 @@ func download() error {
 	sess := session.New(&aws.Config{
 		Region: aws.String("us-east-1"),
 	})
-	client := s3crypto.NewDecryptionClient(sess)
 
-	input := &s3.GetObjectInput{
-		Bucket: &settings.BucketName,
-		Key:    &settings.ObjectKey,
+	registry := s3crypto.NewCryptoRegistry()
+	// Register required content decryption algorithms
+	if err := s3crypto.RegisterAESGCMContentCipher(registry); err != nil {
+		return err
 	}
 
-	result, err := client.GetObject(input)
+	// Register required key wrapping algorithms
+	// Use RegisterKMSContextWrapWithCMK to limit the KMS Decrypt to a single CMK
+	if err := s3crypto.RegisterKMSContextWrapWithCMK(registry, kms.New(sess), settings.KmsKeyArn); err != nil {
+		panic(err)
+	}
+
+	decryptionClient, err := s3crypto.NewDecryptionClientV2(sess, registry)
+	if err != nil {
+		return err
+	}
+
+	objectKey := settings.FileName + ".encrypted"
+	input := &s3.GetObjectInput{
+		Bucket: &settings.BucketName,
+		Key:    &objectKey,
+	}
+
+	result, err := decryptionClient.GetObject(input)
 	// Aside from the S3 errors, here is a list of decryption client errors:
 	//   * InvalidWrapAlgorithmError - returned on an unsupported Wrap algorithm
 	//   * InvalidCEKAlgorithmError - returned on an unsupported CEK algorithm
@@ -77,11 +109,17 @@ func download() error {
 		return err
 	}
 
-	// Let's read the whole body from the response
-	b, err := ioutil.ReadAll(result.Body)
+	outputFile := settings.FileName + ".decrypted"
+	output, err := os.Create(outputFile)
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(b))
+	defer output.Close()
+
+	n, err := io.Copy(output, result.Body)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Downloaded %d bytes \n", n)
 	return nil
 }
